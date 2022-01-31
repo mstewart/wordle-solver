@@ -16,7 +16,14 @@ from unidecode import unidecode
 #   Yellow: (index, letter)
 #   Grey: (letter)
 
-class BasePositionalConstraint(object):
+class BaseConstraint(object):
+    def matches(self, word):
+        raise NotImplementedError
+
+    def filter_function(self):
+        return lambda word: self.matches(word)
+
+class BasePositionalConstraint(BaseConstraint):
     def __init__(self, index, letter):
         if index not in range(0, 5):
             raise ValueError(f"index {index} out of bounds")
@@ -29,17 +36,11 @@ class BasePositionalConstraint(object):
     def __str__(self):
         return f"{type(self).__name__}({self.index}, {self.letter})"
 
-class GreenConstraint(BasePositionalConstraint):
-    def filter_function(self):
-        index, letter = (self.index, self.letter)
-        return lambda word: word[index] == letter
+    def __eq__(self, other):
+        return isinstance(other, type(self)) and \
+                (self.index, self.letter) == (other.index, other.letter)
 
-class YellowConstraint(BasePositionalConstraint):
-    def filter_function(self):
-        index, letter = (self.index, self.letter)
-        return lambda word: (letter in word) and (word[index] != letter)
-
-class GreyConstraint(object):
+class BaseNonPositionalConstraint(BaseConstraint):
     def __init__(self, letter):
         if letter not in string.ascii_letters:
             raise ValueError(f"letter \"{letter}\" is not a valid letter")
@@ -48,9 +49,40 @@ class GreyConstraint(object):
     def __str__(self):
         return f"{type(self).__name__}({self.letter})"
 
-    def filter_function(self):
+    def __eq__(self, other):
+        return isinstance(other, type(self)) and \
+                self.letter == other.letter
+
+class GreenConstraint(BasePositionalConstraint):
+    def matches(self, word):
+        index, letter = (self.index, self.letter)
+        return word[index] == letter
+
+class YellowConstraint(BasePositionalConstraint):
+    def matches(self, word):
+        index, letter = (self.index, self.letter)
+        return (letter in word) and (word[index] != letter)
+
+
+class NoLetterPresentConstraint(BaseNonPositionalConstraint):
+    """A standard "grey" constraint meaning a letter isn't present."""
+    def matches(self, word):
         letter = self.letter
-        return lambda word: letter not in word
+        return letter not in word
+
+
+class LetterNotRepeatedConstraint(BaseNonPositionalConstraint):
+    """A "grey" constraint can, in the case of repeated letters, mean the letter isn't repeated a second time.
+
+    If e.g. your guess has two Ts, and the true word only has one T, then one of your Ts will come back green/yellow,
+    while the other one comes back gray.
+
+    I don't know what behaviour Wordle would have if there were 3 copies of a letter - without code diving into Wordle
+    (which I'm purposely avoiding) it's an undefined hypothetical.
+    """
+    def matches(self, word):
+        letter = self.letter
+        return word.count(letter) < 2
 
 
 class WordleShell(cmd.Cmd):
@@ -89,12 +121,18 @@ class WordleShell(cmd.Cmd):
         for i in range(0, 5):
             letter = word[i]
             constraint_type = hints[i]
+
             if constraint_type == "g":
                 constraint = GreenConstraint(i, letter)
             elif constraint_type == "y":
                 constraint = YellowConstraint(i, letter)
             elif constraint_type == "_":
-                constraint = GreyConstraint(letter)
+                # Check if this is a "none of this letter" result, or a "not repeated" type result:
+                if any([c.letter == letter and (isinstance(c, GreenConstraint) or isinstance(c, YellowConstraint))
+                        for c in self.constraints]):
+                    constraint = LetterNotRepeatedConstraint(letter)
+                else:
+                    constraint = NoLetterPresentConstraint(letter)
             else:
                 raise ValueError(f"invalid hint type \"{constraint_type}\" at position {i}")
             self.apply_new_constraint(constraint)
@@ -112,6 +150,7 @@ class WordleShell(cmd.Cmd):
         print(f"[DEBUG] Applying new constraint {constraint}")
         self.constraints.append(constraint)
         self.words = list(filter(constraint.filter_function(), self.words))
+        print(f"[DEBUG] Words after: #{len(self.words)}")
 
 if __name__ == "__main__":
     if len(sys.argv) > 1:
